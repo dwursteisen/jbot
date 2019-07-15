@@ -26,10 +26,13 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Base class for making Slack Bots. Any class extending
@@ -129,7 +132,7 @@ public abstract class Bot extends BaseBot {
             Event event = mapper.readValue(textMessage.getPayload(), Event.class);
             if (event.getType() != null) {
                 if (event.getType().equalsIgnoreCase(EventType.IM_OPEN.name())
-                        || event.getType().equalsIgnoreCase(EventType.IM_CREATED.name())) {
+                    || event.getType().equalsIgnoreCase(EventType.IM_CREATED.name())) {
                     if (event.getChannelId() != null) {
                         slackService.addImChannelId(event.getChannelId());
                     } else if (event.getChannel() != null) {
@@ -165,13 +168,14 @@ public abstract class Bot extends BaseBot {
      * @param session websocket session between bot and slack
      * @param event   received from slack
      * @param reply   the message to send to slack
+     * @param usersId users Id user in the message. Whose id won't be encoded regarding slack encoding policy.
      */
-    protected final void reply(WebSocketSession session, Event event, Message reply) {
+    protected final void reply(WebSocketSession session, Event event, Message reply, String... usersId) {
         try {
             if (StringUtils.isEmpty(reply.getType())) {
                 reply.setType(EventType.MESSAGE.name().toLowerCase());
             }
-            reply.setText(encode(reply.getText()));
+            reply.setText(encode(reply.getText(), usersId));
             if (reply.getChannel() == null && event.getChannelId() != null) {
                 reply.setChannel(event.getChannelId());
             }
@@ -186,8 +190,8 @@ public abstract class Bot extends BaseBot {
         }
     }
 
-    protected final void reply(WebSocketSession session, Event event, String text) {
-        reply(session, event, new Message(text));
+    protected final void reply(WebSocketSession session, Event event, String text, String... usersId) {
+        reply(session, event, new Message(text), usersId);
     }
 
     /**
@@ -289,11 +293,62 @@ public abstract class Bot extends BaseBot {
      * Encode the text before sending to Slack.
      * Learn <a href="https://api.slack.com/docs/formatting">more on message formatting in Slack</a>
      *
+     * For example, for the message: "<@345F> hello! <3"
+     *
+     * `encode(message, "<@345F>");`
+     *
+     * will return:
+     *
+     * "<@345F> hello! &lt;3"
+     *
      * @param message to encode
+     * @param encodingExceptions: list of user ids to NOT encode.
      * @return encoded message
      */
-    private String encode(String message) {
-        return message == null ? null : message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    private String encode(String message, String... encodingExceptions) {
+        if (message == null) {
+            return null;
+        }
+
+        String firstPAss = message.replace("&", "&amp;");
+
+        // search for all part of the message to explode from encoding
+        Set<Integer> exceptions = Arrays.stream(encodingExceptions)
+            .flatMap(ex -> {
+                int start = firstPAss.indexOf(ex);
+                int end = start + ex.length() - 1;
+                return Stream.of(start, end);
+            })
+            .collect(Collectors.toSet());
+
+        String result = firstPAss;
+
+        // search for all remaining characters to exclude
+        List<Integer> toReplace = new ArrayList<>();
+        for (int index = result.indexOf("<"); index >= 0; index = result.indexOf("<", index + 1)) {
+            if (!exceptions.contains(index)) {
+                toReplace.add(index);
+            }
+        }
+
+        for (int index = message.indexOf(">"); index >= 0; index = message.indexOf(">", index + 1)) {
+            if (!exceptions.contains(index)) {
+                toReplace.add(index);
+            }
+        }
+
+        // reverse order
+        toReplace.sort((a, b) -> -1 * Integer.compare(a, b));
+
+        // Replace all remaining characters.
+        for (int i : toReplace) {
+            if(result.charAt(i) == '<') {
+                result = result.substring(0, i) + "&lt;" + result.substring(i + 1);
+            } else if(result.charAt(i) == '>'){
+                result = result.substring(0, i) + "&gt;" + result.substring(i + 1);
+            }
+        }
+        return result;
     }
 
     private StandardWebSocketClient client() {
